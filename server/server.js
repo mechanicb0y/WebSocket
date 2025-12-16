@@ -33,8 +33,9 @@ const io = new Server(httpServer, {
 io.on("connection", (socket) => {
   console.log("Client connected:", socket.id);
 
+
+  // هنا الي بيظهر في الكوسنول في الويب سايد
   // Send a message to the client upon connection(it will show in the browser console)
-  socket.emit("message", "Hello from server");
 
   socket.emit("message", "Hello from server123");
 
