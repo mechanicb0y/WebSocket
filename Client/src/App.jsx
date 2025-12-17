@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import io from 'socket.io-client'
 import './App.css'
+import Input from './components/input';
 
 function App() {
   const [socket, setSocket] = useState(null);
@@ -31,10 +32,12 @@ function App() {
   return (
     <>
       <h1>React Multiplayer Dashboard</h1>
+      <Input placeholder="Enter your name" />
       <p>Connection status: {isConnected ? 'Connected' : 'Disconnected'}</p>
       <p>Socket ID: {socket?.id || 'Not connected'}</p>
     </>
-  )
+  );
+
 }
 
 export default App
