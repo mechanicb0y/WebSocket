@@ -6,13 +6,14 @@ import Input from './components/input';
 function App() {
   const [socket, setSocket] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
+  const [serverResponse, setServerResponse] = useState('');
 
   useEffect(() => {
-    // Create socket connection
+
     const newSocket = io('http://localhost:3000');
     setSocket(newSocket);
 
-    // Socket event listeners
+
     newSocket.on('connect', () => {
       console.log('Connected to server:', newSocket.id);
       setIsConnected(true);
@@ -23,7 +24,13 @@ function App() {
       setIsConnected(false);
     });
 
-    // Cleanup on unmount
+
+    newSocket.on('test response', (data) => {
+      console.log('Response from server:', data);
+      setServerResponse(data);
+    });
+
+
     return () => {
       newSocket.disconnect();
     };
@@ -33,11 +40,29 @@ function App() {
     <>
       <h1>React Multiplayer Dashboard</h1>
       <Input placeholder="Enter your name" />
-      <p>Connection status: {isConnected ? 'Connected' : 'Disconnected'}</p>
-      <p>Socket ID: {socket?.id || 'Not connected'}</p>
+
+      <button onClick={() => {
+        if (socket) {
+          socket.emit('test', 'test msg from web');
+          alert('message sent');
+        }
+      }}>
+        Send Test Message
+      </button>
+
+      <p> Connection: {isConnected ? ' Connected' : ' Disconnected'}</p>
+      <p> Socket ID: {socket?.id || 'Not connected'}</p>
+
+
+      {serverResponse && (
+        <div className="response-box">
+          <h3> Server Response:</h3>
+          <p>{serverResponse}</p>
+          <p><small>Time: {new Date().toLocaleTimeString()}</small></p>
+        </div>
+      )}
     </>
   );
-
 }
 
-export default App
+export default App;
