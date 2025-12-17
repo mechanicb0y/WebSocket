@@ -53,6 +53,24 @@
   animation: fadeIn 0.5s;
 }
 
+/* Selected video info (sky blue) */
+.selected-video {
+  background-color: #87CEEB;
+  /* sky blue */
+  color: #042a2b;
+  padding: 10px;
+  border-radius: 5px;
+  margin-top: 15px;
+  transition: opacity 0.6s ease, transform 0.6s ease;
+  opacity: 1;
+}
+
+.selected-video.hidden {
+  opacity: 0;
+  transform: translateY(-10px);
+  pointer-events: none;
+}
+
 @keyframes fadeIn {
   from {
     opacity: 0;
