@@ -12,7 +12,6 @@ function App() {
   const [videoName, setVideoName] = useState('');
   const [showSelectedInfo, setShowSelectedInfo] = useState(false);
   const fileInputRef = useRef(null);
-  const [isRegistered, setIsRegistered] = useState(false);
   // generate thumbnail from video file (returns dataURL)
   const generateThumbnail = (file) => {
     return new Promise((resolve, reject) => {
@@ -71,11 +70,19 @@ function App() {
   const [uploadBytesSent, setUploadBytesSent] = useState(0);
   const [uploadId, setUploadId] = useState(null);
   const [targetId, setTargetId] = useState('');
-  const [latestVideoUrl, setLatestVideoUrl] = useState(null);
   const [successMessage, setSuccessMessage] = useState('');
   const [thumbnail, setThumbnail] = useState(null);
   const [uploadError, setUploadError] = useState(null);
   const [uploadBroadcast, setUploadBroadcast] = useState(false);
+
+  // Phone mockup states
+  const [receivedVideo, setReceivedVideo] = useState(null);
+  const [videoPlaying, setVideoPlaying] = useState(false);
+
+  // URL-based streaming states
+  const [videoUrl, setVideoUrl] = useState('');
+  const [urlError, setUrlError] = useState('');
+
   const DEVICE_TYPE = 'android'; // restricted to Android phones only now
 
   // helper: format bytes to human readable string
@@ -92,19 +99,34 @@ function App() {
   useEffect(() => { uploadIdRef.current = uploadId; }, [uploadId]);
 
   useEffect(() => {
-
-    const newSocket = io('http://localhost:3000');
+    // Always connect to 172.100.0.118:3000 for Socket.IO server
+    const socketServerUrl = 'http://172.100.0.118:3000';
+    const newSocket = io(socketServerUrl, {
+      reconnection: true,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      reconnectionAttempts: 5,
+      transports: ['websocket', 'polling']
+    });
     setSocket(newSocket);
 
-
     newSocket.on('connect', () => {
-      console.log('Connected to server:', newSocket.id);
+      console.log('✅ Connected to server:', newSocket.id);
       setIsConnected(true);
+      newSocket.emit('register-device', 'dashboard');
     });
 
     newSocket.on('disconnect', () => {
-      console.log('Disconnected from server');
+      console.log('⚠️ Disconnected from server');
       setIsConnected(false);
+    });
+
+    newSocket.on('connect_error', (error) => {
+      console.error('❌ Socket connection error:', error);
+    });
+
+    newSocket.on('reconnect_attempt', () => {
+      console.log('🔄 Attempting to reconnect...');
     });
 
 
@@ -135,53 +157,61 @@ function App() {
 
     newSocket.on('upload-complete', (data) => {
       if (data && data.uploadId === uploadIdRef.current) {
-        setServerResponse(`Upload complete: ${data.name}`);
+        const msg = `✅ Upload complete: ${data.name}`;
+        console.log(msg);
+        setServerResponse(msg);
         setUploadProgress(100);
         setUploading(false);
         setUploadSpeed('');
         setUploadETA('');
-        if (data.url) setLatestVideoUrl(data.url);
       }
     });
 
     newSocket.on('upload-error', (err) => {
-      console.error('Upload error from server', err);
-      setServerResponse(`Upload error: ${err.message || 'unknown'}`);
+      console.error('❌ Upload error from server', err);
+      const errorMsg = err?.message || 'Upload failed';
+      setServerResponse(`Upload error: ${errorMsg}`);
       setUploading(false);
-      setUploadError(err?.message || 'Upload failed');
+      setUploadError(errorMsg);
     });
 
     newSocket.on('delivery-status', (status) => {
       if (status && status.uploadId === uploadIdRef.current) {
         if (status.delivered) {
           const recipients = status.recipients || (status.to && status.to !== 'broadcast' ? 1 : 0);
-          setSuccessMessage(`Upload Complete! ${recipients} recipient${recipients !== 1 ? 's' : ''}`);
-          // clear progress UI immediately
+          const msg = `✅ Video delivered to ${recipients} device${recipients !== 1 ? 's' : ''}`;
+          setSuccessMessage(msg);
+          console.log(msg);
           setUploadProgress(100);
           setUploading(false);
           setUploadSpeed('');
           setUploadETA('');
-
-          // show success message briefly then clear
           setTimeout(() => {
             setSuccessMessage('');
             setUploadProgress(0);
             setUploadId(null);
-          }, 2000);
+          }, 3000);
         } else {
-          setServerResponse(`Delivery failed: ${status.reason}`);
+          const reason = status.reason === 'target-not-android' ? 'Target device is not Android' :
+            status.reason === 'target-not-found' ? 'Target device not found' :
+              status.reason || 'Unknown error';
+          setServerResponse(`❌ Delivery failed: ${reason}`);
           setUploading(false);
         }
       }
     });
 
-    // when mobile receives video
+    // Listen for video from other senders (for phone mockup)
     newSocket.on('mobile-video', (info) => {
-      console.log('Mobile video message:', info);
-      // show video URL and make it playable
-      setServerResponse(`Video available: ${info.name}`);
-      if (info.url) setLatestVideoUrl(info.url);
+      console.log('📱 Video received for phone mockup:', info);
+      const serverUrl = window.location.origin || 'http://172.100.0.118:3000';
+      const videoUrl = info.url?.startsWith('http') ? info.url : `${serverUrl}${info.url}`;
+      setReceivedVideo({ ...info, url: videoUrl });
+      setVideoPlaying(true);
     });
+
+
+
 
     return () => {
       newSocket.disconnect();
@@ -206,6 +236,11 @@ function App() {
   }, [selectedVideo]);
 
 
+  // direct upload short-link states
+  const [directUrl, setDirectUrl] = useState('');
+  const [directUploading, setDirectUploading] = useState(false);
+  const [copiedUrl, setCopiedUrl] = useState(false);
+
   // to handle file selection
   const handleFileSelect = (event) => {
     const file = event.target.files[0];
@@ -220,9 +255,60 @@ function App() {
 
         // generate thumbnail preview (client-side)
         generateThumbnail(file).then(dataUrl => setThumbnail(dataUrl)).catch(() => setThumbnail(null));
+
+        // create a short URL for this file by uploading directly
+        uploadDirect(file);
       } else {
         alert('Please select a video file');
       }
+    }
+  };
+
+  const uploadDirect = async (file) => {
+    try {
+      setDirectUploading(true);
+      setDirectUrl('');
+      // Always use 172.100.0.118:3000 for API calls (server runs on 3000)
+      const serverApiUrl = 'http://172.100.0.118:3000';
+      const endpoint = `${serverApiUrl}/upload-direct`;
+      console.log('📤 Uploading to:', endpoint);
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'x-file-name': file.name,
+          'content-type': file.type || 'application/octet-stream'
+        },
+        body: file
+      });
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(`HTTP ${res.status}: ${txt || 'Upload failed'}`);
+      }
+      const data = await res.json();
+      const short = data?.playUrl || data?.uploadUrl || data?.url;
+      if (short) {
+        setDirectUrl(short);
+        console.log('✅ Short URL ready:', short);
+        setServerResponse(`✅ Short link ready: ${short}`);
+      } else {
+        throw new Error('No URL in response');
+      }
+    } catch (err) {
+      console.error('❌ Direct upload failed:', err.message);
+      setServerResponse(`❌ Short-link failed: ${err.message}`);
+    } finally {
+      setDirectUploading(false);
+    }
+  };
+
+  const copyDirectUrl = async () => {
+    if (!directUrl) return;
+    try {
+      await navigator.clipboard.writeText(directUrl);
+      setCopiedUrl(true);
+      setTimeout(() => setCopiedUrl(false), 2000);
+    } catch (e) {
+      console.error('copy failed', e);
     }
   };
 
@@ -366,172 +452,279 @@ function App() {
     fileInputRef.current.click();
   };
 
+  // Validate and send video URL
+  const validateAndSendUrl = (url) => {
+    setUrlError('');
+
+    if (!url.trim()) {
+      setUrlError('Please enter a video URL');
+      return;
+    }
+
+    // Basic URL validation
+    try {
+      new URL(url);
+    } catch (e) {
+      setUrlError('Invalid URL format');
+      return;
+    }
+
+    // Check for common video extensions or MIME types
+    const videoExtensions = ['.mp4', '.webm', '.ogg', '.mov', '.m4v', '.mkv', '.avi', '.flv', '.wmv'];
+    const isVideoUrl = videoExtensions.some(ext => url.toLowerCase().includes(ext)) ||
+      url.includes('youtube.com') ||
+      url.includes('vimeo.com') ||
+      url.includes('stream');
+
+    if (!isVideoUrl && !url.includes('?')) {
+      setUrlError('⚠️ URL might not be a video. Proceeding anyway...');
+      // Don't return - still allow it
+    }
+
+    sendVideoUrl(url);
+  };
+
+  // Send video URL to connected phone
+  const sendVideoUrl = (url) => {
+    if (!socket) {
+      setServerResponse('❌ Not connected to server');
+      return;
+    }
+
+    if (!isConnected) {
+      setServerResponse('❌ Socket not connected');
+      return;
+    }
+
+    console.log('🎬 Sending video URL to phone:', url);
+
+    // Send URL as event (simpler than file upload)
+    socket.emit('send-video-url', {
+      url: url,
+      name: url.split('/').pop() || 'video',
+      timestamp: Date.now()
+    }, (ack) => {
+      if (ack) {
+        setServerResponse(`✅ URL sent to phone: ${url}`);
+        setVideoUrl('');
+      } else {
+        setServerResponse('❌ Failed to send URL to phone');
+      }
+    });
+  };
+
+  // Handle keyboard enter in URL input
+  const handleUrlKeyPress = (e) => {
+    if (e.key === 'Enter') {
+      validateAndSendUrl(videoUrl);
+    }
+  };
+
 
   return (
-    <>
-      <h1>React Multiplayer Dashboard</h1>
-      <Input placeholder="Enter your name" />
-
-      {/* button to open file picker */}
-      <input
-        type="file"
-        ref={fileInputRef}
-        style={{ display: 'none' }}
-        accept="video/*"
-        onChange={handleFileSelect}
-      />
-
-      {/* SENDER: upload controls */}
-      <div className="role-section sender-section" style={{ marginTop: '12px', padding: '10px', borderRadius: 6 }}>
-        <div className="role-badge">SENDER</div>
-
-        {/* button to choose video file */}
-        <div style={{ marginTop: '8px' }}>
-          <button onClick={openFilePicker} style={{ margin: '6px' }} title="Select a video file to send">📁 Choose Video File</button>
-        </div>
-
-        {/* display selected video info */}
-        {selectedVideo && (
-          <div className={`selected-video ${!showSelectedInfo ? 'hidden' : ''}`} style={{ margin: '15px', padding: '10px', borderRadius: '5px', display: 'flex', gap: '12px', alignItems: 'center' }}>
-            {thumbnail && <img src={thumbnail} alt="thumb" style={{ width: 120, height: 68, objectFit: 'cover', borderRadius: 6 }} />}
-            <div style={{ textAlign: 'left' }}>
-              <p>📹 <strong>{selectedVideo.name}</strong></p>
-              <p>📏 Size: {formatBytes(selectedVideo.size)} ({Math.round(selectedVideo.size / 1024)} KB)</p>
-              <p>🗂️ Format: {selectedVideo.type || (selectedVideo.name.split('.').pop() || 'unknown')}</p>
-              <p>🕒 Last modified: {selectedVideo.lastModified ? new Date(selectedVideo.lastModified).toLocaleString() : 'N/A'}</p>
-            </div>
+    <div className="app-container">
+      <div className="header">
+        <div className="brand">
+          <div className="logo-circle">MV</div>
+          <div>
+            <h1>Multicast Video Dashboard</h1>
+            <div className="small-muted">Send videos to connected Android devices</div>
           </div>
-        )}
+        </div>
+        <div>
+          <div className="small-muted">Connection: {isConnected ? 'Connected' : 'Disconnected'}</div>
+          <div className="small-muted">Socket ID: {socket?.id || 'Not connected'}</div>
+        </div>
+      </div>
 
-        {/* send video to mobile */}
-        {selectedVideo && (
-          <div style={{ marginTop: '10px' }}>
-            <div style={{ marginBottom: '8px' }}>
-              <label style={{ marginRight: '8px' }}>Target ID:</label>
-              <input value={targetId} onChange={(e) => setTargetId(e.target.value)} placeholder="(optional) target client id" title="Enter recipient Socket ID (leave empty for broadcast)" />
-            </div>
+      <div className="main-grid">
+        <div className="card">
+          <h2>Sender</h2>
 
-            <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+          {/* button to open file picker */}
+          <input
+            type="file"
+            ref={fileInputRef}
+            style={{ display: 'none' }}
+            accept="video/*"
+            onChange={handleFileSelect}
+          />
+
+          <div style={{ marginTop: 12 }}>
+            <button className="send-btn" onClick={openFilePicker} title="Select a video file to send">Choose Video File</button>
+          </div>
+
+          {/* Video URL input section */}
+          <div style={{ marginTop: 16, borderTop: '1px solid rgba(255,255,255,0.2)', paddingTop: 16 }}>
+            <div style={{ fontSize: '0.9em', fontWeight: 600, marginBottom: 8, color: '#06b6d4' }}>OR send video via URL:</div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+              <input
+                type="text"
+                value={videoUrl}
+                onChange={(e) => setVideoUrl(e.target.value)}
+                onKeyPress={handleUrlKeyPress}
+                placeholder="https://example.com/video.mp4"
+                style={{ flex: 1, minWidth: 200 }}
+              />
               <button
                 className="send-btn"
-                onClick={() => { setUploadBroadcast(false); sendVideoToMobileChunked(false); }}
-                style={{ margin: '10px' }}
-                disabled={!isConnected || uploading}
-                title="Send this upload only to the specified Target ID (Android only)">
-                {uploading && !isPaused ? 'Uploading...' : '📱 Send to Android Phone'}
+                onClick={() => validateAndSendUrl(videoUrl)}
+                disabled={!isConnected || !videoUrl.trim()}
+                style={{ whiteSpace: 'nowrap' }}
+              >
+                Send URL to Phone
               </button>
+            </div>
+            {urlError && <div style={{ color: '#ff6b6b', fontSize: '0.85em', marginTop: 6 }}>{urlError}</div>}
+          </div>
 
-              <button
-                className="broadcast-btn"
-                onClick={() => {
-                  if (!selectedVideo) { alert('Please select a video file first!'); return; }
-                  const ok = window.confirm('Send this upload to ALL connected clients?');
-                  if (ok) { setUploadBroadcast(true); sendVideoToMobileChunked(true); }
-                }}
-                style={{ margin: '10px' }}
-                disabled={!isConnected || uploading}
-                title="Send this upload to all connected Android clients">
-                🔊 Send to All Connected Clients
-              </button>
+          {/* display selected video info */}
+          {selectedVideo && (
+            <div className={`selected-video ${!showSelectedInfo ? 'hidden' : ''}`} style={{ marginTop: 12 }}>
+              {thumbnail && <img src={thumbnail} alt="thumb" style={{ width: 120, height: 68, objectFit: 'cover', borderRadius: 8 }} />}
+              <div style={{ textAlign: 'left' }}>
+                <div style={{ fontWeight: 700 }}>{selectedVideo.name}</div>
+                <div className="small-muted">{formatBytes(selectedVideo.size)} • {selectedVideo.type || (selectedVideo.name.split('.').pop() || 'unknown')}</div>
 
-              {/* pause/resume/cancel/retry controls */}
-              {uploading && (
-                <>
-                  {!isPaused ? (
-                    <button onClick={pauseUpload} style={{ margin: '10px' }} title="Pause the ongoing upload">⏸ Pause</button>
-                  ) : (
-                    <button onClick={resumeUpload} style={{ margin: '10px' }} title="Resume the paused upload">▶ Resume</button>
-                  )}
-                  <button onClick={cancelUpload} style={{ margin: '10px' }} title="Cancel the upload in progress">✖ Cancel</button>
-                </>
+                {/* Direct short URL (prominent) */}
+                <div style={{ marginTop: 10 }}>
+                  {directUploading ? (
+                    <div>Generating short link…</div>
+                  ) : (directUrl && (
+                    <div className="link-box">
+                      <a href={directUrl} target="_blank" rel="noreferrer">{directUrl}</a>
+                      <button className="copy-btn" onClick={copyDirectUrl}>{copiedUrl ? 'Copied' : 'Copy URL'}</button>
+                    </div>
+                  ))}
+                </div>
+
+              </div>
+            </div>
+          )}
+
+          {/* send video to mobile */}
+          {selectedVideo && (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ marginBottom: 8 }}>
+                <label style={{ marginRight: 8 }}>Target ID:</label>
+                <input value={targetId} onChange={(e) => setTargetId(e.target.value)} placeholder="(optional) target client id" />
+              </div>
+
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <button
+                  className="send-btn"
+                  onClick={() => { setUploadBroadcast(false); sendVideoToMobileChunked(false); }}
+                  disabled={!isConnected || uploading}
+                >
+                  {uploading && !isPaused ? 'Uploading...' : 'Send to Android Phone'}
+                </button>
+
+                <button
+                  className="broadcast-btn"
+                  onClick={() => { if (!selectedVideo) return; const ok = window.confirm('Send this upload to ALL connected clients?'); if (ok) { setUploadBroadcast(true); sendVideoToMobileChunked(true); } }}
+                  disabled={!isConnected || uploading}
+                >
+                  Send to All Connected Clients
+                </button>
+
+                {/* pause/resume/cancel/retry controls */}
+                {uploading && (
+                  <>
+                    {!isPaused ? (
+                      <button onClick={pauseUpload}>⏸ Pause</button>
+                    ) : (
+                      <button onClick={resumeUpload}>▶ Resume</button>
+                    )}
+                    <button onClick={cancelUpload}>✖ Cancel</button>
+                  </>
+                )}
+
+                {uploadError && (
+                  <button onClick={retryUpload}>↻ Retry</button>
+                )}
+              </div>
+
+              {/* show progress while uploading (hide when reaches 100%) */}
+              {(uploadProgress > 0 && uploadProgress < 100) && (
+                <div className="upload-progress">
+                  <div className="progress-bar">
+                    <div className="progress-fill" style={{ width: `${uploadProgress}%` }}></div>
+                  </div>
+                  <div style={{ marginTop: 6 }}>
+                    <strong>{uploadProgress}%</strong> • {uploadSpeed}
+                  </div>
+                </div>
               )}
 
-              {uploadError && (
-                <button onClick={retryUpload} style={{ margin: '10px' }} title="Retry the upload from the beginning">↻ Retry</button>
+              {/* success message shown briefly */}
+              {successMessage && (
+                <div className="response-box" style={{ marginTop: 10 }}>
+                  <strong>✓ {successMessage}</strong>
+                </div>
               )}
             </div>
+          )}
+        </div>
 
-            {/* show progress while uploading (hide when reaches 100%) */}
-            {(uploadProgress > 0 && uploadProgress < 100) && (
-              <div className="upload-progress">
-                <div className="progress-bar">
-                  <div className="progress-fill" style={{ width: `${uploadProgress}%` }}></div>
+        {/* Phone Mockup */}
+        {receivedVideo && (
+          <div className="phone-mockup-container">
+            <div className="phone-mockup">
+              {/* Phone frame */}
+              <div className="phone-frame">
+                {/* Status bar */}
+                <div className="phone-status-bar">
+                  <span>9:41</span>
+                  <div className="phone-status-icons">
+                    <span>📶</span>
+                    <span>🔋</span>
+                  </div>
                 </div>
-                <div style={{ marginTop: '6px' }}>
-                  <strong>{uploadProgress}%</strong> • {uploadSpeed} • ETA: {uploadETA}
+
+                {/* Video display */}
+                <div className="phone-video-container">
+                  <video
+                    src={receivedVideo.url}
+                    controls
+                    autoPlay
+                    muted
+                    style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                    onPlay={() => setVideoPlaying(true)}
+                    onEnded={() => setVideoPlaying(false)}
+                  />
                 </div>
               </div>
-            )}
 
-            {/* success message shown briefly */}
-            {successMessage && (
-              <div className="response-box success" style={{ marginTop: '10px' }}>
-                <strong>✓ {successMessage}</strong>
-              </div>
-            )}
+              {/* Phone notch */}
+              <div className="phone-notch"></div>
+            </div>
+
+            {/* Video info */}
+            <div style={{ marginTop: 12, textAlign: 'center', color: '#fff' }}>
+              <p style={{ fontSize: 12, margin: '4px 0' }}>📱 {receivedVideo.name}</p>
+              <p style={{ fontSize: 11, color: '#9ca3af', margin: 0 }}>{videoPlaying ? '▶ Playing...' : 'Ready'}</p>
+              <button
+                onClick={() => setReceivedVideo(null)}
+                style={{ marginTop: 8, padding: '6px 12px', borderRadius: 4, border: 'none', background: '#ef4444', color: '#fff', cursor: 'pointer', fontSize: 12 }}
+              >
+                Close
+              </button>
+            </div>
           </div>
         )}
-      </div>
 
-
-      <button onClick={() => {
-        if (socket) {
-          socket.emit('test', 'test msg from web');
-          alert('message sent');
-        }
-      }}>
-        Send Test Message
-      </button>
-
-      <p> Connection: {isConnected ? ' Connected' : ' Disconnected'}</p>
-      <p> Socket ID: {socket?.id || 'Not connected'}</p>
-
-      {/* RECEIVER: registration controls */}
-      <div className="role-section receiver-section" style={{ marginTop: '12px', padding: '10px', borderRadius: 6 }}>
-        <div className="role-badge">RECEIVER</div>
-
-        <div style={{ marginTop: '8px', display: 'flex', gap: '10px', alignItems: 'center' }}>
-          <button
-            onClick={() => {
-              if (!socket) return;
-              if (!isRegistered) {
-                socket.emit('register-device', 'android');
-                setIsRegistered(true);
-                setServerResponse('Registered as Android receiver');
-              } else {
-                // unregister by sending null device
-                socket.emit('register-device', null);
-                setIsRegistered(false);
-                setLatestVideoUrl(null);
-                setServerResponse('Unregistered as Android receiver');
-              }
-            }}
-            disabled={!isConnected}
-            title="Register or unregister this client as an Android receiver"
-          >{!isRegistered ? '🔌 Register as Android Receiver' : '⛔ Unregister Receiver'}</button>
-
-          <div>
-            <div className="small-muted">Status: {isRegistered ? <strong style={{ color: '#059669' }}>Registered</strong> : <strong style={{ color: '#6b7280' }}>Not registered</strong>}</div>
+        <div className="card">
+          <h2>Controls</h2>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <button onClick={() => { if (socket) { socket.emit('test', 'test msg from web'); alert('message sent'); } }} className="copy-btn">Send Test Message</button>
+            <div className="small-muted">Server response:</div>
+            {serverResponse && <div className="response-box"><p style={{ margin: 0 }}>{serverResponse}</p><p style={{ marginTop: 8, fontSize: 12 }}><small>🕐 {new Date().toLocaleTimeString()}</small></p></div>}
           </div>
+
+
         </div>
       </div>
-
-      {serverResponse && (
-        <div className="response-box">
-          <h3> Server Response:</h3>
-          <p>{serverResponse}</p>
-          <p><small>Time: {new Date().toLocaleTimeString()}</small></p>
-        </div>
-      )}
-
-      {isRegistered && latestVideoUrl && (
-        <div style={{ marginTop: '18px' }}>
-          <h3>Latest Video (receiver)</h3>
-          <video className="responsive-video" src={latestVideoUrl} controls playsInline controlsList="nodownload" style={{ maxWidth: '100%' }} />
-          <p><a href={latestVideoUrl} target="_blank" rel="noreferrer">Open raw file</a></p>
-        </div>
-      )}
-    </>
+    </div>
   );
 }
 
