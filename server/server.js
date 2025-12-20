@@ -354,11 +354,19 @@ io.on("connection", (socket) => {
     console.log(`✅ Registered device for ${socket.id}: ${device}`);
     console.log(`📊 Total registered clients: ${Array.from(clients.values()).filter(e => e.device).length}`);
     console.log(`   All clients:`, Array.from(clients.entries()).map(([id, e]) => `${id.substring(0, 8)}:${e.device || 'unregistered'}`).join(', '));
+
+    // notify all connected dashboards about current clients
+    const clientList = Array.from(clients.entries()).map(([id, e]) => ({ id, device: e.device || null }));
+    io.emit('clients-updated', clientList);
   });
 
   socket.on('disconnect', () => {
     console.log(`⚠️ Client disconnected: ${socket.id}`);
     clients.delete(socket.id);
+
+    // notify dashboards about updated clients list
+    const clientList = Array.from(clients.entries()).map(([id, e]) => ({ id, device: e.device || null }));
+    io.emit('clients-updated', clientList);
   });
 
 
@@ -569,9 +577,6 @@ io.on("connection", (socket) => {
   });
 
 
-
-
-
   socket.on("message", (data) => {
     console.log("Message from client:", data);
   });
@@ -582,8 +587,6 @@ io.on("connection", (socket) => {
   });
 });
 
-httpServer.listen(3000, () => {
-  console.log("Server running at http://localhost:3000");
-  console.log("Ready to send videos to mobile");
+httpServer.listen(3000, '0.0.0.0', () => {
+  console.log("Server running at http://0.0.0.0:3000 (accessible from all IPs)");
 });
-

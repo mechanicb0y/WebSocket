@@ -70,6 +70,7 @@ function App() {
   const [uploadBytesSent, setUploadBytesSent] = useState(0);
   const [uploadId, setUploadId] = useState(null);
   const [targetId, setTargetId] = useState('');
+  const [clients, setClients] = useState([]);
   const [successMessage, setSuccessMessage] = useState('');
   const [thumbnail, setThumbnail] = useState(null);
   const [uploadError, setUploadError] = useState(null);
@@ -99,13 +100,19 @@ function App() {
   useEffect(() => { uploadIdRef.current = uploadId; }, [uploadId]);
 
   useEffect(() => {
-    // Always connect to 172.100.0.118:3000 for Socket.IO server
-    const socketServerUrl = 'http://172.100.0.118:3000';
+    // Build socket server URL dynamically (localStorage override -> current host :3000)
+    const socketServerUrl = localStorage.getItem('socketServerUrl') || (() => {
+      const host = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? '127.0.0.1' : window.location.hostname;
+      return `http://${host}:3000`;
+    })();
+    console.log('Connecting to socket server at', socketServerUrl);
+
     const newSocket = io(socketServerUrl, {
       reconnection: true,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,
-      reconnectionAttempts: 5,
+      // do not cap reconnection attempts so the dashboard will keep trying after a reboot
+      // (remove `reconnectionAttempts` so default of unlimited attempts applies)
       transports: ['websocket', 'polling']
     });
     setSocket(newSocket);
@@ -127,6 +134,22 @@ function App() {
 
     newSocket.on('reconnect_attempt', () => {
       console.log('🔄 Attempting to reconnect...');
+      setServerResponse('🔄 Attempting to reconnect...');
+    });
+
+    newSocket.on('reconnect', (attemptNumber) => {
+      console.log('🔄 Reconnected after', attemptNumber, 'attempts');
+      setServerResponse('✅ Reconnected to server');
+    });
+
+    newSocket.on('reconnect_failed', () => {
+      console.error('❌ Reconnect failed — will keep trying in background');
+      setServerResponse('❌ Failed to reconnect (will keep trying)');
+    });
+
+    // updated clients list from server (contains [{id, device}])
+    newSocket.on('clients-updated', (list) => {
+      setClients(Array.isArray(list) ? list : []);
     });
 
 
@@ -327,6 +350,12 @@ function App() {
       return;
     }
 
+    // quick validation of target id for direct sends
+    if (!broadcast && targetId && !clients.find(c => c.id === targetId)) {
+      setServerResponse('❌ Target ID not connected');
+      return;
+    }
+
     const totalSize = selectedVideo.size;
     const totalChunks = Math.ceil(totalSize / CHUNK_SIZE_LOCAL);
     totalChunksRef.current = totalChunks;
@@ -430,6 +459,11 @@ function App() {
       return;
     }
 
+    if (targetId && !clients.find(c => c.id === targetId)) {
+      setServerResponse('❌ Target ID not connected');
+      return;
+    }
+
     const reader = new FileReader();
     reader.onload = function (e) {
       // send video data to server
@@ -498,11 +532,12 @@ function App() {
 
     console.log('🎬 Sending video URL to phone:', url);
 
-    // Send URL as event (simpler than file upload)
+    // Send URL as event (now supports optional targetId)
     socket.emit('send-video-url', {
       url: url,
       name: url.split('/').pop() || 'video',
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      targetId: targetId || null
     }, (ack) => {
       if (ack) {
         setServerResponse(`✅ URL sent to phone: ${url}`);
@@ -717,7 +752,25 @@ function App() {
           <h2>Controls</h2>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <button onClick={() => { if (socket) { socket.emit('test', 'test msg from web'); alert('message sent'); } }} className="copy-btn">Send Test Message</button>
-            <div className="small-muted">Server response:</div>
+
+            <div style={{ marginTop: 12 }}>
+              <div className="small-muted">Connected devices:</div>
+              {clients.length === 0 ? (
+                <div className="response-box" style={{ marginTop: 6 }}>No clients connected</div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 6 }}>
+                  {clients.map(c => (
+                    <div key={c.id} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <div style={{ fontSize: 12 }}><strong>{c.device || 'unknown'}</strong> • <code style={{ fontSize: 11 }}>{c.id.substring(0, 8)}</code></div>
+                      <button className="copy-btn" onClick={() => { navigator.clipboard.writeText(c.id); setServerResponse('Copied ID'); }}>Copy ID</button>
+                      <button className="copy-btn" onClick={() => { setTargetId(c.id); setServerResponse(`Target set to ${c.id.substring(0, 8)}`); }}>Set Target</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="small-muted" style={{ marginTop: 12 }}>Server response:</div>
             {serverResponse && <div className="response-box"><p style={{ margin: 0 }}>{serverResponse}</p><p style={{ marginTop: 8, fontSize: 12 }}><small>🕐 {new Date().toLocaleTimeString()}</small></p></div>}
           </div>
 
